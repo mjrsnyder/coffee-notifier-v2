@@ -29,11 +29,11 @@ EnergyMonitor emon1;
 int RESET_PIN = D2;
 
 char slack_url[128];
-char slack_username[64] = "Barista Joe";
-char burner_min_amps[5] = "0.3";
-char burner_max_amps[5] = "0.4";
+char slack_username[64] = "Barista Sam";
+char burner_min_amps[5] = "0.6";
+char burner_max_amps[5] = "0.8";
 char heater_min_amps[5] = "3.0";
-char current_threshold[5] = "0.1";
+char current_threshold[5] = "0.4";
 char current_delta_timeout[5] = "500"; //ms
 
 double previousCurrent = 0.0;
@@ -96,6 +96,9 @@ bool sendNotification(String msg){
 }
 
 void changeDetected(double previousCurrent, double latestCurrent, double &baseCurrent){
+  Serial.println("Change detected");
+  Serial.println("Previous Current: " + String(previousCurrent));
+  Serial.println("Latest Current: " + String(latestCurrent));
   // first check to see if this is the first check after a reset
   if (previousCurrent == 0.0) {
     //baseCurrent = latestCurrent;
@@ -112,8 +115,7 @@ void changeDetected(double previousCurrent, double latestCurrent, double &baseCu
     // Try and guess what change happened
     // TODO: refactor to something more configurable
     // For now do these checks in decending order
-    double absDelta = abs(delta);
-    displayPower(previousCurrent);
+    double absDelta = fabs(delta);
     String msg = "";
     if (absDelta > atof(heater_min_amps)) {
       // notifiiii main heater (coffee is probably brewing)
@@ -121,7 +123,7 @@ void changeDetected(double previousCurrent, double latestCurrent, double &baseCu
       if (increase) {
         msg = "Coffee is brewing";
       } else {
-        msg ="Coffee is almost done brewing";
+        msg = "Coffee is almost done brewing";
       }
       sendNotification(msg);
     } else if (absDelta > atof(burner_min_amps) && absDelta < atof(burner_max_amps)) {
@@ -135,8 +137,9 @@ void changeDetected(double previousCurrent, double latestCurrent, double &baseCu
     } else {
       // notifiii ¯\_(ツ)_/¯
       msg = "Something changed but I don't know what\n*Previous Current:* " + String(previousCurrent) + "\n*Latest Current:* " + String(latestCurrent);
-      sendNotification(msg);
+      //sendNotification(msg);
     }
+    Serial.println(msg);
   }
 }
 
@@ -211,7 +214,7 @@ void setup() {
   wifiManager.setSaveConfigCallback(saveConfigCallback);
 
   //set callback that gets called when connecting to previous WiFi fails, and enters Access Point mode
-  wifiManager.setAPCallback(configModeCallback);
+  //wifiManager.setAPCallback(configModeCallback);
 
   //add all your parameters here
   wifiManager.addParameter(&custom_slack_url);
@@ -244,6 +247,15 @@ void setup() {
   strcpy(heater_min_amps, custom_heater_min_amps.getValue());
   strcpy(current_threshold, custom_current_threshold.getValue());
   strcpy(current_delta_timeout, custom_current_delta_timeout.getValue());
+
+  Serial.println("Slack URL: " + String(slack_url));
+  Serial.println("Slack Username: " + String(slack_username));
+  Serial.println("Burner Min: " + String(burner_min_amps));
+  Serial.println("Burner Max: " + String(burner_max_amps));
+  Serial.println("Heater Min: " + String(heater_min_amps));
+  Serial.println("Current Threshold: " + String(atof(current_threshold)));
+  Serial.println("Delta Timeout: " + String(int(atof(current_delta_timeout))));
+
   //save the custom parameters to FS
   if (shouldSaveConfig) {
     Serial.println("saving config");
@@ -287,18 +299,18 @@ void loop() {
   delta = previousCurrent - latestCurrent;
 
   // maybe make this recursive?
-  if (abs(delta) > atof(current_threshold)) {
+  if (fabs(delta) > atof(current_threshold)) {
     // check a few times to make sure there is a sustained load
-    delay(int(atof(current_delta_timeout)));
+    delay(500);
     latestCurrent = emon1.calcIrms(1480);
     delta = previousCurrent - latestCurrent;
-    if ( abs(delta) > atof(current_threshold)) {
+    if ( fabs(delta) > atof(current_threshold)) {
       changeDetected(previousCurrent, latestCurrent, baseCurrent);
     }
   }
   previousCurrent = latestCurrent;
   displayPower(latestCurrent);
-  if(digitalRead(RESET_PIN) == LOW){
+/*  if(digitalRead(RESET_PIN) == LOW){
     Serial.println("Resetting...");
     SPIFFS.format();
     delay(100);
@@ -311,5 +323,5 @@ void loop() {
     Serial.println("WiFi Disconnected");
     ESP.reset();
     delay(1000);
-  }
+  } */
 }
