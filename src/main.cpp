@@ -131,7 +131,7 @@ void changeDetected(double previousCurrent, double latestCurrent, double &baseCu
       if (increase) {
         msg = "Burner turned on (hopefuly coffee is coming)";
       } else {
-        msg = "Burner turned off (cofee is probably old or gone)";
+        msg = "Burner turned off (coffee is probably old or gone)";
       }
       sendNotification(msg);
     } else {
