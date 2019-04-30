@@ -120,12 +120,20 @@ void changeDetected(double previousCurrent, double latestCurrent, double &baseCu
     if (absDelta > atof(heater_min_amps)) {
       // notifiiii main heater (coffee is probably brewing)
       // unless someone is making tea TODO: <===
-      if (increase) {
-        msg = "Coffee is brewing";
-      } else {
-        msg = "Coffee is almost done brewing";
+      delay(30000); //haxx
+      double validationCurrent = emon1.calcIrms(1480);
+
+      double validateDelta = previousCurrent - validationCurrent;
+
+      if (fabs(validateDelta) > atof(heater_min_amps)) {
+        if (increase) {
+          msg = "Coffee is brewing";
+        } else {
+          msg = "Coffee is done brewing";
+        }
+        sendNotification(msg);
       }
-      sendNotification(msg);
+
     } else if (absDelta > atof(burner_min_amps) && absDelta < atof(burner_max_amps)) {
       // notifiii burner
       if (increase) {
