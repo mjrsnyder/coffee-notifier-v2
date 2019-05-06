@@ -95,10 +95,12 @@ bool sendNotification(String msg){
   }
 }
 
-void changeDetected(double previousCurrent, double latestCurrent, double &baseCurrent){
+double changeDetected(double previousCurrent, double latestCurrent, double &baseCurrent){
   Serial.println("Change detected");
   Serial.println("Previous Current: " + String(previousCurrent));
   Serial.println("Latest Current: " + String(latestCurrent));
+
+  double validationCurrent = latestCurrent;
   // first check to see if this is the first check after a reset
   if (previousCurrent == 0.0) {
     //baseCurrent = latestCurrent;
@@ -121,7 +123,8 @@ void changeDetected(double previousCurrent, double latestCurrent, double &baseCu
       // notifiiii main heater (coffee is probably brewing)
       // unless someone is making tea TODO: <===
       delay(30000); //haxx
-      double validationCurrent = emon1.calcIrms(1480);
+
+      validationCurrent = emon1.calcIrms(1480);
 
       double validateDelta = previousCurrent - validationCurrent;
 
@@ -148,7 +151,9 @@ void changeDetected(double previousCurrent, double latestCurrent, double &baseCu
       //sendNotification(msg);
     }
     Serial.println(msg);
+
   }
+  return validationCurrent;
 }
 
 void setup() {
@@ -313,7 +318,7 @@ void loop() {
     latestCurrent = emon1.calcIrms(1480);
     delta = previousCurrent - latestCurrent;
     if ( fabs(delta) > atof(current_threshold)) {
-      changeDetected(previousCurrent, latestCurrent, baseCurrent);
+      latestCurrent = changeDetected(previousCurrent, latestCurrent, baseCurrent);
     }
   }
   previousCurrent = latestCurrent;
