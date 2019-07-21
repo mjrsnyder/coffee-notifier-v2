@@ -1,9 +1,7 @@
 #include <FS.h>                   //this needs to be first, or it all crashes and burns...
 #include <Arduino.h>
 
-#include "SSD1306Wire.h"
-
-#include "EmonLib.h"
+#include "CSE7766.h"              //https://github.com/ingeniuske/CSE7766
 
 #include <ESP8266WiFi.h>          //https://github.com/esp8266/Arduino
 
@@ -16,17 +14,25 @@
 #include <Ticker.h>
 Ticker ticker;
 
-int DISPLAY_HEIGHT = 64;
-int DISPLAY_WIDTH = 128;
+#include "RemoteDebug.h"        //https://github.com/JoaoLopesF/RemoteDebug
+RemoteDebug Debug;
+#define HOST_NAME "remotedebug-CSE7766"
+
+#define RELAY_PIN       12
+#define LED             13
+#define SWITCH          0
+
+// Log values every 2 seconds
+#define UPDATE_TIME     2000
 
 //flag for saving data
 bool shouldSaveConfig = false;
 
-SSD1306Wire display(0x3c, D6, D5);
-WiFiClientSecure secClient;
-EnergyMonitor emon1;
 
-int RESET_PIN = D2;
+WiFiClientSecure secClient;
+WiFiManager wifiManager;
+
+CSE7766 myCSE7766;
 
 char slack_url[128];
 char slack_username[64] = "Barista Sam";
@@ -38,25 +44,23 @@ char current_delta_timeout[5] = "500"; //ms
 
 double previousCurrent = 0.0;
 double latestCurrent = 0.0;
-double baseCurrent = 0.0;
 double delta = 0.0;
+
 
 //callback notifying us of the need to save config
 void saveConfigCallback () {
-  Serial.println("Should save config");
   shouldSaveConfig = true;
 }
 
 void tick()
 {
   //toggle state
-  int state = digitalRead(BUILTIN_LED);  // get the current state of GPIO1 pin
-  digitalWrite(BUILTIN_LED, !state);     // set pin to the opposite state
+  int state = digitalRead(LED);  // get the current state of GPIO1 pin
+  digitalWrite(LED, !state);     // set pin to the opposite state
 }
 
 //gets called when WiFiManager enters configuration mode
 void configModeCallback (WiFiManager *myWiFiManager) {
-  Serial.println("Entered config mode");
   Serial.println(WiFi.softAPIP());
   //if you used auto generated SSID, print it
   Serial.println(myWiFiManager->getConfigPortalSSID());
@@ -64,48 +68,48 @@ void configModeCallback (WiFiManager *myWiFiManager) {
   ticker.attach(0.2, tick);
 }
 
-void displayPower(double Irms){
-  display.clear();
-  display.setFont(ArialMT_Plain_16);
-  display.drawString(DISPLAY_WIDTH/2, 16, "Amps");
-  display.drawString(DISPLAY_WIDTH/2, 32, String(Irms));
-  display.display();
-}
-
 bool sendNotification(String msg){
+  ticker.attach(0.1, tick);
   const char* host = "hooks.slack.com";
   const int httpsPort = 443;
 
   if (!secClient.connect(host, httpsPort)) {
+    ticker.detach();
+    debugA("Failed to connect to Slack %s", slack_url);
     return false;
   }
   String postData="payload={\"link_names\": 1, \"icon_emoji\": \":coffee:\", \"username\": \"" + String(slack_username) + "\", \"text\": \"" + msg + "\"}";
-
+  debugA("Posting to Slack");
   secClient.print(String("POST ") + String(slack_url) + " HTTP/1.1\r\n" +
                "Host: " + host + "\r\n" +
                "Content-Type: application/x-www-form-urlencoded\r\n" +
                "Connection: close" + "\r\n" +
                "Content-Length:" + postData.length() + "\r\n" +
                "\r\n" + postData);
+  debugA("Posted to Slack");
   String line = secClient.readStringUntil('\n');
+  ticker.detach();
   if (line.startsWith("HTTP/1.1 200 OK")) {
+    debugA("Successfully sent notification to Slack");
     return true;
+
   } else {
+    debugA("Failed to send notification to Slack");
     return false;
   }
 }
 
-double changeDetected(double previousCurrent, double latestCurrent, double &baseCurrent){
-  Serial.println("Change detected");
-  Serial.println("Previous Current: " + String(previousCurrent));
-  Serial.println("Latest Current: " + String(latestCurrent));
+void resetSettings(){
+  wifiManager.resetSettings();
+  delay(1000);
+  ESP.reset();
+  delay(1000);
+}
 
+double changeDetected(double previousCurrent, double latestCurrent){
   double validationCurrent = latestCurrent;
   // first check to see if this is the first check after a reset
-  if (previousCurrent == 0.0) {
-    //baseCurrent = latestCurrent;
-    // display base current detected
-  } else {
+  if (previousCurrent != 0.0) {
     double delta = previousCurrent - latestCurrent;
     bool increase;
     if (delta < 0.0) {
@@ -124,7 +128,8 @@ double changeDetected(double previousCurrent, double latestCurrent, double &base
       // unless someone is making tea TODO: <===
       delay(30000); //haxx
 
-      validationCurrent = emon1.calcIrms(1480);
+      myCSE7766.handle();
+      validationCurrent = myCSE7766.getCurrent();
 
       double validateDelta = previousCurrent - validationCurrent;
 
@@ -148,37 +153,29 @@ double changeDetected(double previousCurrent, double latestCurrent, double &base
     } else {
       // notifiii ¯\_(ツ)_/¯
       msg = "Something changed but I don't know what\n*Previous Current:* " + String(previousCurrent) + "\n*Latest Current:* " + String(latestCurrent);
-      //sendNotification(msg);
     }
-    Serial.println(msg);
-
   }
   return validationCurrent;
 }
 
 void setup() {
-  // put your setup code here, to run once:
-  Serial.begin(115200);
+  // Close the relay to switch on the load
+  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(SWITCH, INPUT_PULLUP);
+  digitalWrite(RELAY_PIN, HIGH);
 
   //set led pin as output
-  pinMode(BUILTIN_LED, OUTPUT);
+  pinMode(LED, OUTPUT);
   // start ticker with 0.5 because we start in AP mode and try to connect
   ticker.attach(0.6, tick);
   //clean FS, for testing
 
-  pinMode(RESET_PIN, INPUT_PULLUP);
-
   //read configuration from FS json
-  Serial.println("mounting FS...");
-
   if (SPIFFS.begin()) {
-    Serial.println("mounted file system");
     if (SPIFFS.exists("/config.json")) {
       //file exists, reading and loading
-      Serial.println("reading config file");
       File configFile = SPIFFS.open("/config.json", "r");
       if (configFile) {
-        Serial.println("opened config file");
         size_t size = configFile.size();
         // Allocate a buffer to store contents of the file.
         std::unique_ptr<char[]> buf(new char[size]);
@@ -188,8 +185,6 @@ void setup() {
         JsonObject& json = jsonBuffer.parseObject(buf.get());
         json.printTo(Serial);
         if (json.success()) {
-          Serial.println("\nparsed json");
-
           strcpy(slack_url, json["slack_url"]);
           strcpy(slack_username, json["slack_username"]);
           strcpy(burner_min_amps, json["burner_min_amps"]);
@@ -199,13 +194,10 @@ void setup() {
           strcpy(current_delta_timeout, json["current_delta_timeout"]);
 
         } else {
-          Serial.println("failed to load json config");
         }
         configFile.close();
       }
     }
-  } else {
-    Serial.println("failed to mount FS");
   }
 
   WiFiManagerParameter custom_slack_url("slack_url", "Slack Webhook Url", slack_url, 128);
@@ -215,13 +207,6 @@ void setup() {
   WiFiManagerParameter custom_heater_min_amps("heater_min_amps", "Lower Heater Amperage Threshold", heater_min_amps, 5);
   WiFiManagerParameter custom_current_threshold("current_threshold", "Current Delta Detection Threshold", current_threshold, 5);
   WiFiManagerParameter custom_current_delta_timeout("current_delta_timeout", "Time between delta verification", current_delta_timeout, 5);
-
-  //WiFiManager
-  //Local intialization. Once its business is done, there is no need to keep it around
-  WiFiManager wifiManager;
-
-  //reset settings - for testing
-  //wifiManager.resetSettings();
 
   //set config save notify callback
   wifiManager.setSaveConfigCallback(saveConfigCallback);
@@ -243,14 +228,10 @@ void setup() {
   //here  "AutoConnectAP"
   //and goes into a blocking loop awaiting configuration
   if (!wifiManager.autoConnect()) {
-    Serial.println("failed to connect and hit timeout");
     //reset and try again, or maybe put it to deep sleep
     ESP.reset();
     delay(1000);
   }
-
-  //if you get here you have connected to the WiFi
-  Serial.println("connected...yeey :)");
 
   //read updated parameters
   strcpy(slack_url, custom_slack_url.getValue());
@@ -261,17 +242,9 @@ void setup() {
   strcpy(current_threshold, custom_current_threshold.getValue());
   strcpy(current_delta_timeout, custom_current_delta_timeout.getValue());
 
-  Serial.println("Slack URL: " + String(slack_url));
-  Serial.println("Slack Username: " + String(slack_username));
-  Serial.println("Burner Min: " + String(burner_min_amps));
-  Serial.println("Burner Max: " + String(burner_max_amps));
-  Serial.println("Heater Min: " + String(heater_min_amps));
-  Serial.println("Current Threshold: " + String(atof(current_threshold)));
-  Serial.println("Delta Timeout: " + String(int(atof(current_delta_timeout))));
-
   //save the custom parameters to FS
   if (shouldSaveConfig) {
-    Serial.println("saving config");
+
     DynamicJsonBuffer jsonBuffer;
     JsonObject& json = jsonBuffer.createObject();
     json["slack_url"] = slack_url;
@@ -283,9 +256,6 @@ void setup() {
     json["current_delta_timeout"] = current_delta_timeout;
 
     File configFile = SPIFFS.open("/config.json", "w");
-    if (!configFile) {
-      Serial.println("failed to open config file for writing");
-    }
 
     json.printTo(Serial);
     json.printTo(configFile);
@@ -295,19 +265,23 @@ void setup() {
 
   ticker.detach();
   //keep LED on
-  digitalWrite(BUILTIN_LED, LOW);
+  digitalWrite(LED, LOW);
 
-  display.init();
-  display.flipScreenVertically();
-  display.setTextAlignment(TEXT_ALIGN_CENTER_BOTH);
-  display.setFont(ArialMT_Plain_16);
+  myCSE7766.setRX(1);
+  myCSE7766.begin();
 
-  emon1.current(A0,111.1);
+  secClient.setInsecure();
+
+  Debug.begin(HOST_NAME);
+  Debug.setResetCmdEnabled(true); // Enable the reset command
+  debugA("Debugging Enabled");
+
 }
 
 void loop() {
   // get current current (he he, I probably will make this pun a lot)
-  latestCurrent = emon1.calcIrms(1480);
+  myCSE7766.handle();
+  latestCurrent = myCSE7766.getCurrent();
 
   delta = previousCurrent - latestCurrent;
 
@@ -315,26 +289,29 @@ void loop() {
   if (fabs(delta) > atof(current_threshold)) {
     // check a few times to make sure there is a sustained load
     delay(500);
-    latestCurrent = emon1.calcIrms(1480);
+    myCSE7766.handle();
+    latestCurrent = myCSE7766.getCurrent();
     delta = previousCurrent - latestCurrent;
     if ( fabs(delta) > atof(current_threshold)) {
-      latestCurrent = changeDetected(previousCurrent, latestCurrent, baseCurrent);
+      debugA("Change Detected");
+      latestCurrent = changeDetected(previousCurrent, latestCurrent);
     }
   }
   previousCurrent = latestCurrent;
-  displayPower(latestCurrent);
-/*  if(digitalRead(RESET_PIN) == LOW){
-    Serial.println("Resetting...");
-    SPIFFS.format();
-    delay(100);
-    Serial.println("FS Formatted");
-    WiFi.disconnect();
-    delay(100);
-    WiFiManager wifiManager;
-    wifiManager.resetSettings();
-    delay(100);
-    Serial.println("WiFi Disconnected");
-    ESP.reset();
-    delay(1000);
-  } */
+
+  static unsigned long mLastTime = 0;
+  if ((millis() - mLastTime) >= UPDATE_TIME) {
+
+    // Time
+    mLastTime = millis();
+    debugA("Voltage: %f", myCSE7766.getVoltage());
+    debugA("Current: %f", myCSE7766.getCurrent());
+    debugA("Energy:  %f", myCSE7766.getEnergy());
+  }
+
+  if(!digitalRead(SWITCH)){
+    resetSettings();
+  }
+  Debug.handle();
+  yield();
 }
